@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>你好</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+    }
+    canvas {
+      display: block;
+    }
+    body > video {
+      position: fixed !important;
+      left: -9999px !important;
+      top: -9999px !important;
+      width: 1px !important;
+      height: 1px !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/p5.min.js"></script>
+</head>
+<body>
+<script>
+// ==================== 全局变量 ====================
+let videoEl;
+let cols = 80;
+let rows = 60;
+let spacingX, spacingY, spacing;
+let camReady = false;
+let camError = null;
+
+let originPos = [];
+let currentPos = [];
+let phase = [];
+
+let time = 0;
+let rot  = 0;
+
+let camBuffer;
+
+// ==================== setup ====================
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+
+  originPos  = new Array(cols * rows);
+  currentPos = new Array(cols * rows);
+  phase      = new Array(cols * rows);
+
+  for (let i = 0; i < cols * rows; i++) {
+    originPos[i]  = createVector(0, 0);
+    currentPos[i] = createVector(0, 0);
+    phase[i]      = random(TWO_PI);
+  }
+  layoutGrid();
+
+  camBuffer = createGraphics(cols, rows);
+  camBuffer.noStroke();
+
+  // ============ 用 getUserMedia 拿摄像头 ============
+  videoEl = document.createElement('video');
+  videoEl.autoplay    = true;
+  videoEl.muted       = true;
+  videoEl.playsInline = true;
+  videoEl.setAttribute('playsinline', '');
+  videoEl.style.position   = 'fixed';
+  videoEl.style.left       = '-9999px';
+  videoEl.style.top        = '-9999px';
+  videoEl.style.width      = '1px';
+  videoEl.style.height     = '1px';
+  videoEl.style.opacity    = '0';
+  videoEl.style.pointerEvents = 'none';
+  document.body.appendChild(videoEl);
+
+  navigator.mediaDevices.getUserMedia({ video: true })
+    .then(stream => {
+      videoEl.srcObject = stream;
+      return videoEl.play();
+    })
+    .catch(err => {
+      camError = err.message || String(err);
+      console.error('摄像头访问失败：', err);
+    });
+}
+
+// ==================== 网格坐标计算（铺满屏幕） ====================
+function layoutGrid() {
+  spacingX = width  / cols;   // x 方向独立间距
+  spacingY = height / rows;   // y 方向独立间距
+  spacing  = (spacingX + spacingY) * 0.5;  // 用于点大小的平均值
+
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      let i = y * cols + x;
+      // 每个粒子落在格子中心
+      let ox = x * spacingX + spacingX * 0.5;
+      let oy = y * spacingY + spacingY * 0.5;
+      originPos[i].set(ox, oy);
+      currentPos[i].set(ox, oy);
+    }
+  }
+}
+
+// ==================== 主循环 ====================
+function draw() {
+  background(0);
+
+  if (camError) {
+    fill(255, 80, 80);
+    noStroke();
+    textAlign(CENTER, CENTER);
+    textSize(16);
+    text("摄像头访问失败：" + camError, width / 2, height / 2);
+    return;
+  }
+
+  if (!camReady) {
+    if (videoEl && videoEl.videoWidth > 0 && videoEl.readyState >= 2) {
+      camReady = true;
+      console.log('摄像头就绪：' + videoEl.videoWidth + ' x ' + videoEl.videoHeight);
+    } else {
+      fill(255);
+      noStroke();
+      textAlign(CENTER, CENTER);
+      textSize(18);
+      text("正在请求摄像头权限…", width / 2, height / 2);
+      return;
+    }
+  }
+
+  // ============ 摄像头 → camBuffer（contain，保持完整画面） ============
+  let vw = videoEl.videoWidth;
+  let vh = videoEl.videoHeight;
+  let videoAspect  = vw / vh;
+  let screenAspect = width / height;
+
+  let dw, dh, dx, dy;
+  if (videoAspect > screenAspect) {
+    // 视频更宽 → 以宽度为基准，上下留黑边
+    dw = cols;
+    dh = cols / videoAspect;
+    dx = 0;
+    dy = (rows - dh) / 2;
+  } else {
+    // 视频更高 → 以高度为基准，左右留黑边
+    dh = rows;
+    dw = rows * videoAspect;
+    dx = (cols - dw) / 2;
+    dy = 0;
+  }
+
+  camBuffer.drawingContext.fillStyle = 'rgb(20,20,20)';
+  camBuffer.drawingContext.fillRect(0, 0, cols, rows);
+  camBuffer.drawingContext.drawImage(videoEl, dx, dy, dw, dh);
+  camBuffer.loadPixels();
+
+  // ============ 绘制粒子（不再 translate，直接用绝对坐标） ============
+  let returnEase    = 0.12;
+  let radius        = min(width, height) * 0.25;
+  let swirlStrength = 30;
+
+  for (let i = 0; i < cols * rows; i++) {
+
+    if (mouseIsPressed) {
+      currentPos[i].x = lerp(currentPos[i].x, originPos[i].x, returnEase);
+      currentPos[i].y = lerp(currentPos[i].y, originPos[i].y, returnEase);
+
+    } else {
+      let baseAngle = map(i, 0, cols * rows, 0, TWO_PI);
+      let angle     = baseAngle + rot;
+
+      let x0 = originPos[i].x;
+      let y0 = originPos[i].y;
+
+      // 魔法阵圆环中心 = 屏幕中心
+      let x3 = width  / 2 + cos(angle) * radius;
+      let y3 = height / 2 + sin(angle) * radius;
+
+      let x1 = x0 + cos(angle + HALF_PI) * 120;
+      let y1 = y0 + sin(angle + HALF_PI) * 120;
+
+      let x2 = x3 + cos(angle - HALF_PI) * 120;
+      let y2 = y3 + sin(angle - HALF_PI) * 120;
+
+      let t = (sin(time + phase[i]) + 1) * 0.5;
+
+      let bx = bezierPoint(x0, x1, x2, x3, t);
+      let by = bezierPoint(y0, y1, y2, y3, t);
+
+      bx += sin(time * 2 + phase[i]) * swirlStrength;
+      by += cos(time * 1.7 + phase[i]) * swirlStrength;
+
+      currentPos[i].set(bx, by);
+    }
+
+    // 摄像头颜色 & 点大小
+    let pi = i * 4;
+    let r  = camBuffer.pixels[pi];
+    let g  = camBuffer.pixels[pi + 1];
+    let b  = camBuffer.pixels[pi + 2];
+
+    let c  = color(r, g, b);
+    let br = (r + g + b) / 3;
+    let s  = map(br, 0, 255, 3, spacing);
+
+    noStroke();
+    fill(c);
+    ellipse(currentPos[i].x, currentPos[i].y, s, s);
+  }
+
+  if (!mouseIsPressed) {
+    rot  += 0.01;
+    time += 0.02;
+  }
+}
+
+// ==================== 自适应窗口 ====================
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  layoutGrid();
+}
+</script>
+</body>
+</html>
